@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+# omarchy-rgb – RGB-Beleuchtung (OpenRGB) an Omarchy-Hintergrund oder Theme anpassen.
+#
+# Nachfolger von omarchy-openrgb-wallpaper-sync (vor Quattro). Wird vom Service
+# des Plugins raimo.rgb-sync bei Theme-/Hintergrundwechsel aufgerufen, vom
+# theme-set-Hook und vom Panel in der Bar. Einstellungen: ~/.config/omarchy/rgb-sync.json
+#
+#   omarchy-rgb sync [--force]     Farbe berechnen und anwenden (ohne --force nur bei Änderung)
+#   omarchy-rgb status             Einstellungen + letzter Zustand als JSON
+#   omarchy-rgb preview            Nur Farbe berechnen, nichts anwenden
+#   omarchy-rgb set <key> <wert>   Einstellung ändern und neu synchronisieren
+#   omarchy-rgb on | off           Sync an/aus (aus = LEDs schwarz)
+#   omarchy-rgb devices            Von OpenRGB erkannte Geräte auflisten
+
+import colorsys
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+HOME = Path.home()
+STATE_HOME = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state"))
+CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+CURRENT = STATE_HOME / "omarchy/current"
+CONFIG_FILE = CONFIG_HOME / "omarchy/rgb-sync.json"
+STATE_FILE = STATE_HOME / "omarchy-rgb/state.json"
+LOCK_FILE = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "omarchy-rgb.lock"
+
+SOURCES = ("wallpaper", "theme", "fixed")
+
+DEFAULTS = {
+    "enabled": True,
+    "source": "wallpaper",      # wallpaper | theme | fixed
+    "themeKey": "accent",       # Schlüssel aus colors.toml, oder "keyboard" für keyboard.rgb
+    "fixedColor": "#FF00AA",
+    "saturation": 1.0,          # 0..1 (1 = maximal satt)
+    "brightness": 1.0,          # 0..1 (1 = volle Helligkeit)
+    "topFraction": 0.55,        # nur oberer Bildanteil (Himmel) zählt
+    "fallbackHue": 330,         # Grad, wenn kein Farbton erkennbar ist (Magenta)
+    "mode": "direct",
+    "timeout": 20,              # Sekunden pro openrgb-Aufruf (gegen Hänger)
+    "retries": 5,               # beim Login sind die Geräte evtl. noch nicht bereit
+    "retryDelay": 3,
+    # IDs aus `openrgb -l`. channelOrder korrigiert vertauschte Kanäle:
+    # beim Mainboard sind G und B vertauscht, deshalb RBG.
+    # zones leer = ganzes Gerät, sonst z. B. [2, 3] für JRAINBOW1+2.
+    "devices": [
+        {"id": 0, "name": "Gehäuse (MSI Mystic Light)", "channelOrder": "RBG", "zones": []},
+        {"id": 1, "name": "Maus (Roccat Kone Aimo)", "channelOrder": "RGB", "zones": []},
+        {"id": 2, "name": "Tastatur (Roccat Horde Aimo)", "channelOrder": "RGB", "zones": []},
+    ],
+}
+
+
+def load_json(path, fallback):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return fallback
+
+
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    tmp.replace(path)
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    cfg.update(load_json(CONFIG_FILE, {}))
+    if not CONFIG_FILE.exists():
+        write_json(CONFIG_FILE, cfg)
+    return cfg
+
+
+def clamp(x):
+    return max(0.0, min(1.0, float(x)))
+
+
+def norm_hex(value):
+    m = re.search(r"#?([0-9A-Fa-f]{6})", str(value))
+    return m.group(1).upper() if m else None
+
+
+def hex_to_rgb(hx):
+    return tuple(int(hx[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def rgb_to_hex(r, g, b):
+    return "".join(f"{int(round(c * 255)):02X}" for c in (r, g, b))
+
+
+def from_hue(hue, cfg):
+    return rgb_to_hex(*colorsys.hsv_to_rgb(hue, clamp(cfg["saturation"]), clamp(cfg["brightness"])))
+
+
+def current_background(wait=0):
+    link = CURRENT / "background"
+    for _ in range(int(wait)):
+        if link.exists():
+            break
+        time.sleep(1)
+    return str(link.resolve()) if link.exists() else ""
+
+
+def current_theme():
+    try:
+        return (CURRENT / "theme.name").read_text().strip()
+    except OSError:
+        return ""
+
+
+def wallpaper_hue(path, top_frac):
+    """Dominanter Farbton im oberen Bildteil; None wenn das Bild fast grau ist."""
+    from PIL import Image
+
+    img = Image.open(path).convert("RGB")
+    img.thumbnail((480, 480))  # schneller als jedes n-te Pixel zu sampeln
+    w, h = img.size
+    img = img.crop((0, 0, w, max(1, int(h * top_frac))))
+
+    bins = [0] * 36
+    pixels = img.get_flattened_data() if hasattr(img, "get_flattened_data") else img.getdata()
+    for r, g, b in pixels:
+        hh, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        # Dunkle und graue Pixel (Silhouetten, Weiß/Grau) ignorieren
+        if v > 0.35 and s > 0.18:
+            bins[int(hh * 36) % 36] += 1
+    if max(bins) == 0:
+        return None
+    k = max(range(36), key=lambda i: bins[i])
+    return (k + 0.5) / 36
+
+
+def theme_color(key):
+    theme_dir = CURRENT / "theme"
+    if key == "keyboard":
+        return norm_hex((theme_dir / "keyboard.rgb").read_text())
+    for line in (theme_dir / "colors.toml").read_text().splitlines():
+        m = re.match(rf'\s*{re.escape(key)}\s*=\s*"?#?([0-9A-Fa-f]{{6}})', line)
+        if m:
+            return m.group(1).upper()
+    return None
+
+
+def theme_palette():
+    """Farben des aktuellen Themes für die Auswahl im Panel."""
+    out = []
+    try:
+        for line in (CURRENT / "theme/colors.toml").read_text().splitlines():
+            m = re.match(r'\s*(accent|color\d+)\s*=\s*"?#?([0-9A-Fa-f]{6})', line)
+            if m:
+                out.append({"key": m.group(1), "color": "#" + m.group(2).upper()})
+    except OSError:
+        pass
+    return out
+
+
+def compute(cfg, wait=0):
+    """Gibt (hex, beschreibung) zurück."""
+    source = cfg["source"]
+    fallback = (cfg["fallbackHue"] % 360) / 360
+
+    if source == "fixed":
+        hx = norm_hex(cfg["fixedColor"]) or "FF00AA"
+        h, s, v = colorsys.rgb_to_hsv(*hex_to_rgb(hx))
+        return rgb_to_hex(*colorsys.hsv_to_rgb(h, s, v * clamp(cfg["brightness"]))), "feste Farbe"
+
+    if source == "theme":
+        hx = theme_color(cfg["themeKey"])
+        if not hx:
+            raise RuntimeError(f"'{cfg['themeKey']}' nicht im Theme gefunden")
+        h, s, _ = colorsys.rgb_to_hsv(*hex_to_rgb(hx))
+        # Fast graue Themefarbe hat keinen stabilen Farbton
+        return from_hue(h if s >= 0.08 else fallback, cfg), f"Theme {current_theme()} ({cfg['themeKey']})"
+
+    bg = current_background(wait)
+    if not bg:
+        raise RuntimeError("Hintergrund nicht gefunden")
+    hue = wallpaper_hue(bg, float(cfg["topFraction"]))
+    return from_hue(fallback if hue is None else hue, cfg), f"Hintergrund {Path(bg).name}"
+
+
+def reorder(hx, order):
+    ch = dict(zip("RGB", (hx[0:2], hx[2:4], hx[4:6])))
+    return "".join(ch[c] for c in order.upper())
+
+
+def apply(hx, cfg):
+    # Alle Geräte in einem openrgb-Aufruf – der Gerätescan kostet die meiste Zeit
+    args = ["openrgb"]
+    for dev in cfg["devices"]:
+        color = reorder(hx, dev.get("channelOrder", "RGB"))
+        for zone in dev.get("zones") or [None]:
+            args += ["-d", str(dev["id"])]
+            if zone is not None:
+                args += ["-z", str(zone)]
+            args += ["-m", cfg["mode"], "-c", color]
+
+    err = ""
+    for attempt in range(int(cfg["retries"])):
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=cfg["timeout"])
+            if r.returncode == 0:
+                return
+            err = (r.stderr or r.stdout).strip().splitlines()[-1:] or ["openrgb fehlgeschlagen"]
+            err = err[0]
+        except subprocess.TimeoutExpired:
+            err = f"openrgb hängt (>{cfg['timeout']}s)"
+        except FileNotFoundError:
+            raise RuntimeError("openrgb ist nicht installiert")
+        time.sleep(cfg["retryDelay"])
+    raise RuntimeError(err)
+
+
+def signature(cfg):
+    keys = ("enabled", "source", "themeKey", "fixedColor", "saturation", "brightness",
+            "topFraction", "fallbackHue", "mode", "devices")
+    return json.dumps([cfg[k] for k in keys] + [current_background(), current_theme()], sort_keys=True)
+
+
+def save_state(**fields):
+    state = load_json(STATE_FILE, {})
+    state.update(fields, updated=datetime.now().isoformat(timespec="seconds"))
+    write_json(STATE_FILE, state)
+
+
+def cmd_sync(force=False, wait=30):
+    with open(LOCK_FILE, "w") as lock:
+        # Warten statt abbrechen: so geht eine Änderung, die während eines
+        # laufenden Syncs kommt, nicht verloren.
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        cfg = load_config()
+        sig = signature(cfg)
+        state = load_json(STATE_FILE, {})
+        if not force and state.get("signature") == sig and state.get("ok"):
+            print(f"#{state.get('color', '')} (unverändert)")
+            return 0
+        try:
+            if cfg["enabled"]:
+                hx, desc = compute(cfg, wait)
+            else:
+                hx, desc = "000000", "aus"
+            apply(hx, cfg)
+        except Exception as e:  # noqa: BLE001 – Fehler landen im Panel
+            save_state(ok=False, error=str(e), signature="", enabled=cfg["enabled"])
+            print(f"Fehler: {e}", file=sys.stderr)
+            return 1
+        save_state(ok=True, error="", color=hx, description=desc, source=cfg["source"],
+                   enabled=cfg["enabled"], signature=sig)
+        print(f"#{hx} – {desc}")
+        return 0
+
+
+def parse_value(key, raw):
+    if key not in DEFAULTS:
+        raise SystemExit(f"Unbekannte Einstellung: {key}")
+    default = DEFAULTS[key]
+    if isinstance(default, bool):
+        return raw.lower() in ("1", "true", "on", "an", "ja", "yes")
+    if isinstance(default, (int, float)):
+        return float(raw) if isinstance(default, float) else int(float(raw))
+    if isinstance(default, list):
+        return json.loads(raw)
+    if key == "source" and raw not in SOURCES:
+        raise SystemExit(f"source muss eins von {', '.join(SOURCES)} sein")
+    if key == "fixedColor":
+        hx = norm_hex(raw)
+        if not hx:
+            raise SystemExit("fixedColor braucht eine Hex-Farbe wie #FF00AA")
+        return "#" + hx
+    return raw
+
+
+def cmd_set(pairs, sync=True):
+    if not pairs or len(pairs) % 2:
+        raise SystemExit("Usage: omarchy-rgb set <key> <wert> [<key> <wert> ...]")
+    cfg = load_config()
+    for key, raw in zip(pairs[::2], pairs[1::2]):
+        cfg[key] = parse_value(key, raw)
+    write_json(CONFIG_FILE, cfg)
+    return cmd_sync(wait=0) if sync else 0
+
+
+def main(argv):
+    cmd = argv[0] if argv else "sync"
+    rest = argv[1:]
+    if cmd == "sync":
+        return cmd_sync(force="--force" in rest)
+    if cmd == "status":
+        print(json.dumps({"config": load_config(), "state": load_json(STATE_FILE, {}),
+                          "theme": current_theme(), "background": current_background(),
+                          "palette": theme_palette()}, ensure_ascii=False))
+        return 0
+    if cmd == "preview":
+        hx, desc = compute(load_config())
+        print(f"#{hx} – {desc}")
+        return 0
+    if cmd == "set":
+        no_sync = "--no-sync" in rest
+        return cmd_set([a for a in rest if a != "--no-sync"], sync=not no_sync)
+    if cmd in ("on", "off"):
+        return cmd_set(["enabled", "true" if cmd == "on" else "false"])
+    if cmd == "devices":
+        return subprocess.call(["openrgb", "-l"])
+    print(__doc__ or "", end="")
+    print("Usage: omarchy-rgb [sync [--force] | status | preview | set <key> <wert> | on | off | devices]",
+          file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

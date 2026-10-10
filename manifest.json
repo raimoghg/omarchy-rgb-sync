@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "raimo.rgb-sync",
+  "name": "RGB Sync",
+  "version": "1.0.0",
+  "author": "raimo",
+  "license": "MIT",
+  "description": "Passt die OpenRGB-Beleuchtung (Gehäuse, Maus, Tastatur) automatisch an Hintergrundbild oder Theme an. Bar-Panel für Quelle, Sättigung, Helligkeit und An/Aus.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "RGB Sync",
+    "description": "OpenRGB-Farbe passend zu Hintergrund oder Theme",
+    "category": "Utilities",
+    "aliases": ["rgb", "openrgb", "led", "lighting"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
