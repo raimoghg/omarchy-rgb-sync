@@ -1,40 +1,85 @@
-# RGB Sync – Omarchy-Plugin
+# RGB Sync for Omarchy
 
-Passt die OpenRGB-Beleuchtung (Gehäuse, Maus, Tastatur) automatisch an das
-Hintergrundbild oder das Theme an. Nachfolger von `omarchy-openrgb-wallpaper-sync`
-aus der Zeit vor Omarchy Quattro.
+Your case, keyboard and mouse lighting follows your Omarchy background or theme —
+automatically, every time it changes.
 
-## Bestandteile
+![RGB Sync panel](preview.png)
 
-| Datei | Aufgabe |
-|---|---|
-| `bin/omarchy-rgb` | CLI mit der ganzen Logik (Farbe berechnen, OpenRGB setzen, Zustand speichern) |
-| `Service.qml` | läuft in `omarchy-shell`, reagiert per inotify auf Theme-/Hintergrundwechsel und synct beim Login |
-| `Panel.qml` | Bar-Button (Punkt = aktuelle LED-Farbe) + Popup |
-| `~/.config/omarchy/hooks/theme-set.d/40-openrgb-led-sync` | ruft `omarchy-rgb sync` beim Theme-Wechsel (auch ohne laufende Shell) |
+A palette icon in the bar shows the current LED color as a small dot. Click it to
+pick the color source, tune saturation and brightness, choose a theme color and
+toggle single devices. Right-click turns the lighting on or off.
 
-Einstellungen: `~/.config/omarchy/rgb-sync.json` · Zustand: `~/.local/state/omarchy-rgb/state.json`
+## How it works
 
-## Bedienung
+- **Background** (default): the dominant hue of the top part of your wallpaper
+  (usually the sky), pushed to full saturation so LEDs don't look washed out.
+- **Theme**: the hue of a color from the current theme's `colors.toml`
+  (`accent` by default, or `keyboard` for the theme's `keyboard.rgb`).
+- **Fixed**: one color of your choice, e.g. picked from the theme palette.
 
-- **Linksklick** auf das Bar-Icon öffnet das Panel: Quelle (Hintergrund / Theme / Fest),
-  Themefarbe, Sättigung, Helligkeit, An/Aus, Neu anwenden
-- **Rechtsklick** schaltet die LEDs an/aus
+A small service runs inside `omarchy-shell` and watches
+`~/.local/state/omarchy/current` with inotify. Theme switches, `omarchy theme bg next`
+and logins all trigger a sync — no autostart entry, hook or extra daemon needed.
+
+## Install
 
 ```bash
-omarchy-rgb status | jq          # Einstellungen + Zustand
-omarchy-rgb preview              # Farbe berechnen ohne anzuwenden
-omarchy-rgb set source theme     # wallpaper | theme | fixed
-omarchy-rgb set themeKey color4  # Schlüssel aus colors.toml, oder "keyboard" (keyboard.rgb)
-omarchy-rgb set fixedColor '#00FFAA'
-omarchy-rgb set brightness 0.6
-omarchy-rgb off / on
-omarchy-rgb sync --force
-omarchy-rgb devices              # openrgb -l
+omarchy pkg add openrgb python-pillow inotify-tools
+omarchy plugin add https://github.com/raimoghg/omarchy-rgb-sync.git --enable
 ```
 
-## Geräte
+The background service is mounted when the shell starts, so restart it once after
+installing: `omarchy restart shell`.
 
-In `rgb-sync.json` unter `devices`: `id` aus `openrgb -l`, `channelOrder` korrigiert
-vertauschte Farbkanäle (das MSI-Mainboard braucht `RBG`), `zones` leer = ganzes Gerät.
-Alle Geräte werden in **einem** `openrgb`-Aufruf gesetzt (~5 s, meist Gerätescan).
+OpenRGB needs access to your hardware first: make sure `openrgb -l` lists your
+devices without `sudo` (see the OpenRGB docs for the i2c/udev setup on your
+mainboard). On the first sync the plugin detects all listed devices.
+
+Optional, to use the CLI from a terminal:
+
+```bash
+ln -s ~/.config/omarchy/plugins/raimoghg.rgb-sync/bin/omarchy-rgb ~/.local/bin/omarchy-rgb
+```
+
+## CLI
+
+```bash
+omarchy-rgb status | jq              # settings, last state, missing dependencies
+omarchy-rgb preview                  # compute the color without applying it
+omarchy-rgb set source theme         # wallpaper | theme | fixed
+omarchy-rgb set themeKey color4      # any key in colors.toml, or "keyboard"
+omarchy-rgb set fixedColor '#00FFAA'
+omarchy-rgb set brightness 0.6
+omarchy-rgb on / off
+omarchy-rgb sync --force
+omarchy-rgb detect                   # re-detect devices, keeps per-device settings
+omarchy-rgb device 0 channelOrder RBG
+omarchy-rgb device 1 enabled false
+```
+
+## Configuration
+
+Settings live in `~/.config/omarchy/rgb-sync.json`, state in
+`~/.local/state/omarchy-rgb/state.json`.
+
+| Key | Default | |
+|---|---|---|
+| `source` | `wallpaper` | `wallpaper`, `theme` or `fixed` |
+| `themeKey` | `accent` | color key used by the theme source |
+| `fixedColor` | `#FF00AA` | color used by the fixed source |
+| `saturation`, `brightness` | `1.0` | 0–1 |
+| `topFraction` | `0.55` | share of the wallpaper (from the top) that is analysed |
+| `fallbackHue` | `330` | hue in degrees when the image has no clear color |
+| `mode` | `direct` | OpenRGB mode |
+| `devices` | detected | see below |
+
+Per device: `id` (from `openrgb -l`), `name`, `enabled`, `zones` (`[]` = whole device)
+and `channelOrder`. Some boards report swapped channels — if green and blue show up
+the wrong way round, set `channelOrder` to `RBG` for that device.
+
+All devices are set in a single `openrgb` call; most of the ~5 s it takes is
+OpenRGB scanning the hardware. When nothing changed the CLI returns immediately.
+
+## License
+
+MIT

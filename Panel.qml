@@ -4,14 +4,14 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Bar-Button + Popup für RGB Sync. Alle Änderungen laufen über das CLI
-// (bin/omarchy-rgb), damit Hook, Service und Panel dieselbe Logik teilen.
+// Bar button + popup for RGB Sync. Every change goes through the bundled CLI
+// (bin/omarchy-rgb), so the service, the panel and the terminal share one code path.
 Panel {
   id: root
-  moduleName: "raimo.rgb-sync"
-  ipcTarget: "raimo.rgb-sync"
+  moduleName: "raimoghg.rgb-sync"
+  ipcTarget: "raimoghg.rgb-sync"
 
-  readonly property string cli: Quickshell.env("HOME") + "/.config/omarchy/plugins/raimo.rgb-sync/bin/omarchy-rgb"
+  readonly property string cli: String(Qt.resolvedUrl("bin/omarchy-rgb")).replace(/^file:\/\//, "")
   readonly property string stateFile: Quickshell.env("HOME") + "/.local/state/omarchy-rgb/state.json"
 
   readonly property color fg: bar ? bar.foreground : Color.foreground
@@ -20,13 +20,15 @@ Panel {
   property var cfg: ({})
   property var state: ({})
   property var palette: []
+  property var missing: []
   property bool busy: actionProc.running
   property var queued: null
 
   readonly property bool enabled: cfg.enabled !== false
   readonly property string source: cfg.source || "wallpaper"
+  readonly property var devices: cfg.devices || []
   readonly property string ledColor: state.color ? "#" + state.color : "transparent"
-  readonly property var sourceLabels: ({ wallpaper: "Hintergrund", theme: "Theme", fixed: "Feste Farbe" })
+  readonly property var sourceLabels: ({ wallpaper: "Background", theme: "Theme", fixed: "Fixed color" })
 
   function refresh() { if (!statusProc.running) statusProc.running = true }
 
@@ -36,15 +38,25 @@ Panel {
       root.cfg = s.config || {}
       root.state = s.state || {}
       root.palette = s.palette || []
+      root.missing = s.missing || []
     } catch (e) {}
   }
 
-  // Optimistisch lokal setzen, dann ans CLI geben (das gleich neu synchronisiert)
+  // Update locally right away, then hand off to the CLI (which re-syncs)
   function setValue(key, value) {
     var next = Object.assign({}, root.cfg)
     next[key] = value
     root.cfg = next
     run(["set", key, String(value)])
+  }
+
+  function setDeviceEnabled(dev, on) {
+    var next = Object.assign({}, root.cfg)
+    next.devices = root.devices.map(function (d) {
+      return d.id === dev.id ? Object.assign({}, d, { enabled: on }) : d
+    })
+    root.cfg = next
+    run(["device", String(dev.id), "enabled", String(on)])
   }
 
   function run(args) {
@@ -66,7 +78,7 @@ Panel {
 
   function timeLabel() {
     if (!state.updated) return ""
-    return "Zuletzt " + state.updated.replace("T", " ").slice(5, 16)
+    return "Updated " + state.updated.replace("T", " ").slice(5, 16)
   }
 
   onOpenedChanged: if (opened) refresh()
@@ -91,7 +103,7 @@ Panel {
     }
   }
 
-  // Bar-Punkt aktualisieren, wenn Hook oder Service synchronisiert haben
+  // Keep the bar dot current when the service syncs in the background
   FileView {
     path: root.stateFile
     watchChanges: true
@@ -104,13 +116,13 @@ Panel {
     bar: root.bar
     text: "󰏘"
     slotSize: Style.bar.iconSlot
-    tooltipText: root.enabled ? "RGB: " + root.ledColor : "RGB aus"
+    tooltipText: root.enabled ? "RGB: " + root.ledColor : "RGB off"
     onPressed: function (b) {
       if (b === Qt.RightButton) root.setValue("enabled", !root.enabled)
       else root.toggle()
     }
 
-    // Kleiner Punkt in der aktuellen LED-Farbe
+    // Small dot in the current LED color
     Rectangle {
       width: Style.space(6)
       height: width
@@ -151,7 +163,7 @@ Panel {
         anchors.top: parent.top
         spacing: Style.space(14)
 
-        // ---------- Hero: Farbfeld · Titel/Status · An/Aus ----------
+        // ---------- Hero: swatch · title/status · on/off ----------
         Item {
           width: parent.width
           implicitHeight: Math.max(swatch.height, heroLabels.implicitHeight)
@@ -179,7 +191,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
-              text: "RGB-Beleuchtung"
+              text: "RGB Lighting"
               color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -190,8 +202,8 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              text: (root.busy ? "Wird angewendet…"
-                    : !root.enabled ? "Aus"
+              text: (root.busy ? "Applying…"
+                    : !root.enabled ? "Off"
                     : (root.ledColor + " · " + root.sourceLabels[root.source])).toUpperCase()
               color: Qt.darker(root.fg, 1.4)
               font.family: root.fontFamily
@@ -215,6 +227,17 @@ Panel {
         }
 
         Text {
+          visible: root.missing.length > 0
+          width: parent.width
+          wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
+          text: "Missing: " + root.missing.join(", ") + "  →  omarchy pkg add " + root.missing.join(" ")
+          color: Color.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Text {
           visible: root.state.ok === false && !!root.state.error
           width: parent.width
           wrapMode: Text.WordWrap
@@ -227,22 +250,22 @@ Panel {
 
         PanelSeparator { foreground: root.fg }
 
-        // ---------- Quelle ----------
+        // ---------- Source ----------
         Column {
           width: parent.width
           spacing: Style.space(10)
           opacity: root.enabled ? 1 : 0.45
 
-          PanelSectionHeader { text: "QUELLE"; foreground: root.fg; fontFamily: root.fontFamily }
+          PanelSectionHeader { text: "SOURCE"; foreground: root.fg; fontFamily: root.fontFamily }
 
           Row {
             id: sourceRow
             width: parent.width
             spacing: Style.space(6)
             readonly property var items: [
-              { id: "wallpaper", icon: "󰸉", label: "Hintergrund" },
+              { id: "wallpaper", icon: "󰸉", label: "Background" },
               { id: "theme", icon: "󰏘", label: "Theme" },
-              { id: "fixed", icon: "󰝤", label: "Fest" }
+              { id: "fixed", icon: "󰝤", label: "Fixed" }
             ]
 
             Repeater {
@@ -265,7 +288,7 @@ Panel {
           }
         }
 
-        // ---------- Farbe aus dem Theme (Theme- und Fest-Modus) ----------
+        // ---------- Theme colors (theme and fixed mode) ----------
         Column {
           visible: root.source !== "wallpaper" && root.palette.length > 0
           width: parent.width
@@ -273,7 +296,7 @@ Panel {
           opacity: root.enabled ? 1 : 0.45
 
           PanelSectionHeader {
-            text: root.source === "theme" ? "THEMEFARBE" : "FARBE AUS DEM THEME"
+            text: root.source === "theme" ? "THEME COLOR" : "PICK FROM THEME"
             foreground: root.fg
             fontFamily: root.fontFamily
           }
@@ -303,7 +326,7 @@ Panel {
           }
         }
 
-        // ---------- Regler ----------
+        // ---------- Sliders ----------
         Column {
           width: parent.width
           spacing: Style.space(8)
@@ -311,12 +334,55 @@ Panel {
 
           SliderRow {
             visible: root.source !== "fixed"
-            label: "Sättigung"
+            label: "Saturation"
             key: "saturation"
           }
           SliderRow {
-            label: "Helligkeit"
+            label: "Brightness"
             key: "brightness"
+          }
+        }
+
+        // ---------- Devices ----------
+        Column {
+          visible: root.devices.length > 0
+          width: parent.width
+          spacing: Style.space(6)
+          opacity: root.enabled ? 1 : 0.45
+
+          PanelSectionHeader { text: "DEVICES"; foreground: root.fg; fontFamily: root.fontFamily }
+
+          Repeater {
+            model: root.devices
+            Item {
+              required property var modelData
+              width: parent.width
+              implicitHeight: deviceSwitch.implicitHeight
+
+              Text {
+                anchors.left: parent.left
+                anchors.right: deviceSwitch.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: modelData.name
+                elide: Text.ElideRight
+                color: root.fg
+                opacity: modelData.enabled === false ? 0.5 : 0.85
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              ToggleSwitch {
+                id: deviceSwitch
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                checked: modelData.enabled !== false
+                busy: root.busy
+                foreground: root.fg
+                onToggled: root.setDeviceEnabled(modelData, modelData.enabled === false)
+              }
+            }
           }
         }
 
@@ -345,7 +411,7 @@ Panel {
             anchors.right: parent.right
             iconText: "󰑐"
             iconSpinning: root.busy
-            text: "Neu anwenden"
+            text: "Apply again"
             fontSize: Style.font.bodySmall
             foreground: root.fg
             fontFamily: root.fontFamily
