@@ -1,25 +1,26 @@
 # RGB Sync for Omarchy
 
-Your case, keyboard and mouse lighting follows your Omarchy background or theme —
-automatically, every time it changes.
+**Your PC lighting follows your desktop.** Switch the Omarchy theme or background and
+your case, keyboard and mouse LEDs change color with it — automatically, via OpenRGB.
 
-![RGB Sync panel](preview.png)
+![RGB Sync: the LEDs pick up the pink of the sunset wallpaper](preview.png)
 
-A palette icon in the bar shows the current LED color as a small dot. Click it to
-pick the color source, tune saturation and brightness, choose a theme color and
-toggle single devices. Right-click turns the lighting on or off.
+## Features
 
-## How it works
+- **Follows your wallpaper** — picks the dominant hue from the top of the image
+  (usually the sky) and pushes it to full saturation, so LEDs don't look washed out
+- **…or your theme** — uses the theme's `accent` (or any other color from
+  `colors.toml`, or the theme's own `keyboard.rgb`)
+- **…or a fixed color** — picked from the current theme's palette
+- **Bar widget** — the dot on the icon shows the current LED color; click for the
+  panel, right-click to switch the lighting on or off
+- **Per-device control** — devices are detected automatically; turn single devices
+  off or fix boards with swapped color channels
+- **No extra daemon** — a tiny service inside `omarchy-shell` reacts to theme and
+  background changes (including `omarchy theme bg next`) and syncs on login
+- **CLI included** — `omarchy-rgb` for scripts, hooks and keybindings
 
-- **Background** (default): the dominant hue of the top part of your wallpaper
-  (usually the sky), pushed to full saturation so LEDs don't look washed out.
-- **Theme**: the hue of a color from the current theme's `colors.toml`
-  (`accent` by default, or `keyboard` for the theme's `keyboard.rgb`).
-- **Fixed**: one color of your choice, e.g. picked from the theme palette.
-
-A small service runs inside `omarchy-shell` and watches
-`~/.local/state/omarchy/current` with inotify. Theme switches, `omarchy theme bg next`
-and logins all trigger a sync — no autostart entry, hook or extra daemon needed.
+<img src="panel.png" alt="RGB Sync panel" width="380">
 
 ## Install
 

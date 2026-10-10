@@ -6,7 +6,7 @@
   "author": "raimoghg",
   "license": "MIT",
   "repository": "https://github.com/raimoghg/omarchy-rgb-sync",
-  "description": "Matches your OpenRGB lighting (case, keyboard, mouse, …) to the Omarchy background or theme, automatically on every change. Bar panel for source, saturation, brightness, per-device toggles and on/off.",
+  "description": "Your PC lighting follows your desktop: OpenRGB LEDs change color with the Omarchy background or theme. Bar panel with source, saturation, brightness and per-device toggles.",
   "kinds": [
     "service",
     "bar-widget"
@@ -18,9 +18,14 @@
   },
   "barWidget": {
     "displayName": "RGB Sync",
-    "description": "OpenRGB color that follows your background or theme",
+    "description": "LED color that follows your background or theme",
     "category": "Utilities",
-    "aliases": ["rgb", "openrgb", "led", "lighting"],
+    "aliases": [
+      "rgb",
+      "openrgb",
+      "led",
+      "lighting"
+    ],
     "allowMultiple": false,
     "defaultSection": "right"
   }
