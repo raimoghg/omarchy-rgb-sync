@@ -42,6 +42,17 @@ Optional, to use the CLI from a terminal:
 ln -s ~/.config/omarchy/plugins/raimoghg.rgb-sync/bin/omarchy-rgb ~/.local/bin/omarchy-rgb
 ```
 
+## Remove
+
+```bash
+omarchy plugin remove raimoghg.rgb-sync
+rm -f ~/.local/bin/omarchy-rgb                                  # only if you created the symlink
+rm -rf ~/.config/omarchy/rgb-sync.json ~/.local/state/omarchy-rgb  # settings and state
+```
+
+Removing the plugin leaves the LEDs at their last color. The plugin only writes its
+own settings and state files listed above and never touches other configuration.
+
 ## CLI
 
 ```bash
