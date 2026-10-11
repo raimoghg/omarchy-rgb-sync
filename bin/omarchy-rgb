@@ -4,11 +4,13 @@
 Called by the plugin's shell service on theme/background changes and by the
 bar panel. Settings live in ~/.config/omarchy/rgb-sync.json.
 
-  omarchy-rgb sync [--force]         Compute and apply the color (only on change unless --force)
+  omarchy-rgb sync [--force] [--detect]
+                                     Compute and apply the color (only on change unless --force);
+                                     --force and --detect re-detect devices first
   omarchy-rgb status                 Settings, last state and dependency check as JSON
   omarchy-rgb preview                Compute the color without applying it
   omarchy-rgb set <key> <value> ...  Change settings and re-sync (--no-sync to skip)
-  omarchy-rgb device <id> <key> <value>
+  omarchy-rgb device <id|name> <key> <value>
                                      Change one device (enabled, channelOrder, zones)
   omarchy-rgb on | off               Enable/disable syncing (off = LEDs black)
   omarchy-rgb detect                 Re-detect OpenRGB devices, keeping per-device settings
@@ -49,8 +51,9 @@ DEFAULTS = {
     "timeout": 20,              # seconds per openrgb call
     "retries": 5,               # devices may not be ready right after login
     "retryDelay": 3,
-    # Filled by device detection on first run. Per device:
-    #   id           index from `openrgb -l`
+    # Filled by device detection (on login, hotplug and `detect`). Per device:
+    #   id           index from `openrgb -l` (changes between boots, devices are matched by name)
+    #   present      false = known but currently not connected
     #   channelOrder fixes swapped channels, e.g. "RBG" when green and blue are swapped
     #   zones        [] = whole device, or zone indices like [2, 3]
     #   enabled      false = leave this device alone
@@ -89,24 +92,50 @@ def missing_dependencies():
     return missing
 
 
-def detect_devices(existing=None):
-    """Read devices from `openrgb -l`, keeping settings of devices we already know."""
+def parse_modes(block):
+    m = re.search(r"^\s*Modes:(.*)$", block, re.M)
+    if not m:
+        return []
+    return [a or b or c for a, b, c in re.findall(r"\[([^\]]+)\]|'([^']+)'|(\S+)", m.group(1))]
+
+
+def pick_mode(modes, wanted):
+    """The configured mode if the device has it, else Static, else none (device default)."""
+    lower = [x.lower() for x in modes]
+    for candidate in (wanted, "static"):
+        if candidate.lower() in lower:
+            return candidate
+    return ""
+
+
+def detect_devices(existing=None, wanted_mode="direct"):
+    """Read devices from `openrgb -l`. New devices are enabled, known ones (matched by
+    name) keep their settings, and known devices that are missing stay in the list
+    with present=false so their settings survive unplugging."""
     if not shutil.which("openrgb"):
         raise Failure("openrgb is not installed")
     try:
         out = subprocess.run(["openrgb", "-l"], capture_output=True, text=True, timeout=60).stdout
     except subprocess.TimeoutExpired:
         raise Failure("openrgb -l timed out")
-    known = {d.get("name"): d for d in (existing or [])}
-    devices = []
-    for m in re.finditer(r"^(\d+): (.+)$", out, re.M):
+    existing = existing or []
+    known = {d.get("name"): d for d in existing}
+    devices, seen = [], set()
+    headers = list(re.finditer(r"^(\d+): (.+)$", out, re.M))
+    for i, m in enumerate(headers):
         dev_id, name = int(m.group(1)), m.group(2).strip()
+        block = out[m.end():headers[i + 1].start() if i + 1 < len(headers) else len(out)]
         dev = {"id": dev_id, "name": name, "channelOrder": "RGB", "zones": [], "enabled": True}
-        dev.update({k: v for k, v in known.get(name, {}).items() if k != "id"})
-        dev["id"] = dev_id
+        dev.update({k: v for k, v in known.get(name, {}).items() if k not in ("id", "present", "mode")})
+        dev.update(id=dev_id, present=True)
+        mode = pick_mode(parse_modes(block), wanted_mode)
+        if mode != wanted_mode:
+            dev["mode"] = mode
         devices.append(dev)
+        seen.add(name)
     if not devices:
         raise Failure("OpenRGB found no devices (check i2c/udev permissions)")
+    devices += [dict(d, present=False) for d in existing if d.get("name") not in seen]
     return devices
 
 
@@ -114,7 +143,7 @@ def load_config(detect=True):
     cfg = dict(DEFAULTS)
     cfg.update(load_json(CONFIG_FILE, {}))
     if cfg["devices"] is None and detect:
-        cfg["devices"] = detect_devices()
+        cfg["devices"] = detect_devices(wanted_mode=cfg["mode"])
         write_json(CONFIG_FILE, cfg)
     elif not CONFIG_FILE.exists():
         write_json(CONFIG_FILE, cfg)
@@ -246,7 +275,7 @@ def apply(hx, cfg):
     # One openrgb call for all devices - the device scan is the slow part.
     # Devices are addressed by name: indices shift when another device (e.g. a
     # gamepad) shows up first after a reboot. Duplicate names fall back to the index.
-    devices = cfg["devices"] or []
+    devices = [d for d in cfg["devices"] or [] if d.get("present", True)]
     names = [d.get("name") for d in devices]
     args = ["openrgb"]
     for dev in devices:
@@ -255,11 +284,14 @@ def apply(hx, cfg):
         color = reorder(hx, dev.get("channelOrder", "RGB"))
         name = dev.get("name")
         target = name if name and names.count(name) == 1 else str(dev["id"])
+        mode = dev.get("mode", cfg["mode"])
         for zone in dev.get("zones") or [None]:
             args += ["-d", target]
             if zone is not None:
                 args += ["-z", str(zone)]
-            args += ["-m", cfg["mode"], "-c", color]
+            if mode:
+                args += ["-m", mode]
+            args += ["-c", color]
     if len(args) == 1:
         return
 
@@ -289,12 +321,20 @@ def save_state(**fields):
     write_json(STATE_FILE, state)
 
 
-def cmd_sync(force=False, wait=30):
+def cmd_sync(force=False, wait=30, detect=False):
     with open(LOCK_FILE, "w") as lock:
         # Wait instead of bailing out, so a change made during a running sync is not lost
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             cfg = load_config()
+            if force or detect:
+                try:
+                    devices = detect_devices(cfg["devices"], cfg["mode"])
+                except Failure:
+                    devices = cfg["devices"]  # OpenRGB not ready yet - keep the known list
+                if devices != cfg["devices"]:
+                    cfg["devices"] = devices
+                    write_json(CONFIG_FILE, cfg)
             sig = signature(cfg)
             state = load_json(STATE_FILE, {})
             if not force and state.get("signature") == sig and state.get("ok"):
@@ -352,14 +392,14 @@ DEVICE_KEYS = {"enabled": True, "channelOrder": "RGB", "zones": []}
 def cmd_device(args):
     if len(args) != 3:
         raise SystemExit("usage: omarchy-rgb device <id> <key> <value>")
-    dev_id, key, raw = int(args[0]), args[1], args[2]
+    target, key, raw = args
     cfg = load_config()
     for dev in cfg["devices"]:
-        if dev["id"] == dev_id:
+        if str(dev["id"]) == target or dev.get("name") == target:
             dev[key] = parse_value(key, raw, DEVICE_KEYS)
             break
     else:
-        raise SystemExit(f"no device with id {dev_id}")
+        raise SystemExit(f"no device {target}")
     write_json(CONFIG_FILE, cfg)
     return cmd_sync(wait=0)
 
@@ -369,7 +409,7 @@ def main(argv):
     rest = argv[1:]
     try:
         if cmd == "sync":
-            return cmd_sync(force="--force" in rest)
+            return cmd_sync(force="--force" in rest, detect="--detect" in rest)
         if cmd == "status":
             print(json.dumps({"config": load_config(detect=False), "state": load_json(STATE_FILE, {}),
                               "theme": current_theme(), "background": current_background(),
@@ -388,10 +428,12 @@ def main(argv):
             return cmd_set(["enabled", "true" if cmd == "on" else "false"])
         if cmd == "detect":
             cfg = load_config(detect=False)
-            cfg["devices"] = detect_devices(cfg["devices"])
+            cfg["devices"] = detect_devices(cfg["devices"], cfg["mode"])
             write_json(CONFIG_FILE, cfg)
             for d in cfg["devices"]:
-                print(f"{d['id']}: {d['name']} ({d['channelOrder']}{'' if d['enabled'] else ', disabled'})")
+                notes = [d["channelOrder"]] + [n for n, on in (("disabled", not d["enabled"]),
+                                                              ("not connected", not d["present"])) if on]
+                print(f"{d['id'] if d['present'] else '-'}: {d['name']} ({', '.join(notes)})")
             return 0
     except Failure as e:
         print(f"error: {e}", file=sys.stderr)

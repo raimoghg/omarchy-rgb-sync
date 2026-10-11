@@ -6,8 +6,10 @@ import Quickshell.Io
 // ~/.local/state/omarchy/current reports theme and background changes (including
 // `omarchy theme bg next` without a theme change); the shell starting means a
 // fresh login, so we sync once on load - forced, because the hardware loses its
-// colors on reboot while theme and background stay the same. Otherwise the CLI
-// decides whether anything actually changed, so duplicate triggers are cheap.
+// colors on reboot while theme and background stay the same. Plugging an RGB
+// device in or out (udev hidraw/usb events) re-detects devices, so new ones join
+// the sync. Otherwise the CLI decides whether anything actually changed, so
+// duplicate triggers are cheap.
 Item {
   id: root
 
@@ -18,6 +20,7 @@ Item {
   property bool pending: false
   property bool polling: false
   property bool forceNext: true
+  property bool detectNext: false
 
   function requestSync() { debounce.restart() }
 
@@ -27,14 +30,17 @@ Item {
     interval: 800
     onTriggered: {
       if (syncProc.running) { root.pending = true; return }
+      syncProc.command = [root.cli, "sync"]
+        .concat(root.forceNext ? ["--force"] : [])
+        .concat(root.detectNext ? ["--detect"] : [])
+      root.forceNext = false
+      root.detectNext = false
       syncProc.running = true
     }
   }
 
   Process {
     id: syncProc
-    command: [root.cli, "sync"].concat(root.forceNext ? ["--force"] : [])
-    onRunningChanged: if (running) root.forceNext = false
     onExited: if (root.pending) { root.pending = false; debounce.restart() }
   }
 
@@ -62,6 +68,23 @@ Item {
   }
 
   Timer { id: restartWatcher; interval: 5000; onTriggered: watcher.running = true }
+
+  // A device connecting fires a burst of events and needs a moment before
+  // OpenRGB can talk to it - wait for things to settle, then re-detect.
+  Process {
+    id: hotplug
+    running: true
+    command: ["udevadm", "monitor", "--udev", "--subsystem-match=hidraw", "--subsystem-match=usb"]
+    stdout: SplitParser {
+      onRead: function (line) {
+        if (/ (add|remove) /.test(line)) hotplugSettle.restart()
+      }
+    }
+    onExited: restartHotplug.start()
+  }
+
+  Timer { id: hotplugSettle; interval: 3000; onTriggered: { root.detectNext = true; root.requestSync() } }
+  Timer { id: restartHotplug; interval: 30000; onTriggered: hotplug.running = true }
   Timer { interval: 3000; repeat: true; running: root.polling; onTriggered: root.requestSync() }
 
   Component.onCompleted: requestSync()

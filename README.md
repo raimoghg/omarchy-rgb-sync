@@ -14,8 +14,9 @@ your case, keyboard and mouse LEDs change color with it — automatically, via O
 - **…or a fixed color** — picked from the current theme's palette
 - **Bar widget** — the dot on the icon shows the current LED color; click for the
   panel, right-click to switch the lighting on or off
-- **Per-device control** — devices are detected automatically; turn single devices
-  off or fix boards with swapped color channels
+- **Every device, automatically** — all OpenRGB devices (case, keyboard, mouse,
+  controllers, …) are detected on login and whenever something is plugged in or
+  out; turn single devices off or fix boards with swapped color channels
 - **No extra daemon** — a tiny service inside `omarchy-shell` reacts to theme and
   background changes (including `omarchy theme bg next`) and syncs on login
 - **CLI included** — `omarchy-rgb` for scripts, hooks and keybindings
@@ -34,7 +35,7 @@ installing: `omarchy restart shell`.
 
 OpenRGB needs access to your hardware first: make sure `openrgb -l` lists your
 devices without `sudo` (see the OpenRGB docs for the i2c/udev setup on your
-mainboard). On the first sync the plugin detects all listed devices.
+mainboard). The plugin syncs every device OpenRGB lists.
 
 Optional, to use the CLI from a terminal:
 
@@ -65,8 +66,8 @@ omarchy-rgb set brightness 0.6
 omarchy-rgb on / off
 omarchy-rgb sync --force
 omarchy-rgb detect                   # re-detect devices, keeps per-device settings
-omarchy-rgb device 0 channelOrder RBG
-omarchy-rgb device 1 enabled false
+omarchy-rgb device 0 channelOrder RBG               # by index from `omarchy-rgb detect`
+omarchy-rgb device "Sony DualSense" enabled false  # or by name
 ```
 
 ## Configuration
@@ -85,9 +86,15 @@ Settings live in `~/.config/omarchy/rgb-sync.json`, state in
 | `mode` | `direct` | OpenRGB mode |
 | `devices` | detected | see below |
 
-Per device: `id` (from `openrgb -l`), `name`, `enabled`, `zones` (`[]` = whole device)
-and `channelOrder`. Some boards report swapped channels — if green and blue show up
-the wrong way round, set `channelOrder` to `RBG` for that device.
+Per device: `name`, `enabled`, `zones` (`[]` = whole device) and `channelOrder`.
+Some boards report swapped channels — if green and blue show up the wrong way
+round, set `channelOrder` to `RBG` for that device.
+
+Devices are matched by name, because OpenRGB's indices (`id`) change when another
+device shows up first. New devices are enabled automatically; unplugged ones stay
+in the list with `present: false`, so their settings are kept for next time.
+Devices without the configured `mode` fall back to `Static`, or to their default
+mode.
 
 All devices are set in a single `openrgb` call; most of the ~5 s it takes is
 OpenRGB scanning the hardware. When nothing changed the CLI returns immediately.

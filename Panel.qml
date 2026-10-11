@@ -26,7 +26,8 @@ Panel {
 
   readonly property bool enabled: cfg.enabled !== false
   readonly property string source: cfg.source || "wallpaper"
-  readonly property var devices: cfg.devices || []
+  // Devices that are known but unplugged keep their settings and are hidden here
+  readonly property var devices: (cfg.devices || []).filter(function (d) { return d.present !== false })
   readonly property string ledColor: state.color ? "#" + state.color : "transparent"
   readonly property var sourceLabels: ({ wallpaper: "Background", theme: "Theme", fixed: "Fixed color" })
 
