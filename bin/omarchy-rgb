@@ -243,14 +243,20 @@ def reorder(hx, order):
 def apply(hx, cfg):
     if not shutil.which("openrgb"):
         raise Failure("openrgb is not installed")
-    # One openrgb call for all devices - the device scan is the slow part
+    # One openrgb call for all devices - the device scan is the slow part.
+    # Devices are addressed by name: indices shift when another device (e.g. a
+    # gamepad) shows up first after a reboot. Duplicate names fall back to the index.
+    devices = cfg["devices"] or []
+    names = [d.get("name") for d in devices]
     args = ["openrgb"]
-    for dev in cfg["devices"] or []:
+    for dev in devices:
         if dev.get("enabled", True) is False:
             continue
         color = reorder(hx, dev.get("channelOrder", "RGB"))
+        name = dev.get("name")
+        target = name if name and names.count(name) == 1 else str(dev["id"])
         for zone in dev.get("zones") or [None]:
-            args += ["-d", str(dev["id"])]
+            args += ["-d", target]
             if zone is not None:
                 args += ["-z", str(zone)]
             args += ["-m", cfg["mode"], "-c", color]

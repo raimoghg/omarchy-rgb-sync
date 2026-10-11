@@ -5,8 +5,9 @@ import Quickshell.Io
 // Runs inside omarchy-shell for the whole session. inotify on
 // ~/.local/state/omarchy/current reports theme and background changes (including
 // `omarchy theme bg next` without a theme change); the shell starting means a
-// fresh login, so we sync once on load. The CLI decides whether anything actually
-// changed, so duplicate triggers are cheap.
+// fresh login, so we sync once on load - forced, because the hardware loses its
+// colors on reboot while theme and background stay the same. Otherwise the CLI
+// decides whether anything actually changed, so duplicate triggers are cheap.
 Item {
   id: root
 
@@ -16,6 +17,7 @@ Item {
   readonly property string currentDir: Quickshell.env("HOME") + "/.local/state/omarchy/current"
   property bool pending: false
   property bool polling: false
+  property bool forceNext: true
 
   function requestSync() { debounce.restart() }
 
@@ -31,7 +33,8 @@ Item {
 
   Process {
     id: syncProc
-    command: [root.cli, "sync"]
+    command: [root.cli, "sync"].concat(root.forceNext ? ["--force"] : [])
+    onRunningChanged: if (running) root.forceNext = false
     onExited: if (root.pending) { root.pending = false; debounce.restart() }
   }
 
